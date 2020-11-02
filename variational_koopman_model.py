@@ -12,12 +12,8 @@ class VariationalKoopman():
             args: Various arguments and specifications
         """
 
-        # Placeholder for states and control inputs
+        # Placeholder for states inputs
         self.x = tf.Variable(np.zeros((2*args.batch_size*args.seq_length, args.state_dim), dtype=np.float32), trainable=False, name="state_values")
-        self.u = tf.Variable(np.zeros((args.batch_size, 2*args.seq_length-1, args.action_dim), dtype=np.float32), trainable=False, name="action_values")
-        
-        # Placeholders for values needed for ilqr
-        self.u_ilqr = tf.Variable(np.zeros((args.batch_size, args.seq_length, args.action_dim), dtype=np.float32), trainable=False, name="action_values_ilqr")
 
         # Parameters to be set externally
         self.learning_rate = tf.Variable(0.0, trainable=False, name="learning_rate")
@@ -26,9 +22,7 @@ class VariationalKoopman():
         # Normalization parameters to be stored
         self.shift = tf.Variable(np.zeros(args.state_dim), trainable=False, name="state_shift", dtype=tf.float32)
         self.scale = tf.Variable(np.zeros(args.state_dim), trainable=False, name="state_scale", dtype=tf.float32)
-        self.shift_u = tf.Variable(np.zeros(args.action_dim), trainable=False, name="action_shift", dtype=tf.float32)
-        self.scale_u = tf.Variable(np.zeros(args.action_dim), trainable=False, name="action_scale", dtype=tf.float32)
-        
+
         # Create the computational graph
         self._create_feature_extractor_params(args)
         self._create_feature_extractor(args)
@@ -39,8 +33,6 @@ class VariationalKoopman():
         self._propagate_solution(args)
         self._create_decoder_params(args)
         self._generate_predictions(args)
-        if args.ilqr:
-            self._find_ilqr_params(args)
         self._create_optimizer(args)
 
     def _create_feature_extractor_params(self, args):
@@ -97,9 +89,8 @@ class VariationalKoopman():
         fwd_cell = tf.nn.rnn_cell.LSTMCell(args.rnn_size, initializer=tf.keras.initializers.glorot_normal())
         bwd_cell = tf.nn.rnn_cell.LSTMCell(args.rnn_size, initializer=tf.keras.initializers.glorot_normal())
 
-        # Construct input -- concatenate sequence of states with sequence of actions
-        padded_u = tf.concat([tf.zeros([args.batch_size, 1, args.action_dim]), self.u[:, :(args.seq_length-1)]], axis=1)
-        rnn_input = tf.concat([self.features[:, :args.seq_length], padded_u], axis=2)
+        # Construct input
+        rnn_input = self.features[:, :args.seq_length]
         
         # Get outputs from rnn and concatenate
         outputs, _ = tf.nn.bidirectional_dynamic_rnn(fwd_cell, bwd_cell, rnn_input, dtype=tf.float32)
@@ -136,7 +127,7 @@ class VariationalKoopman():
         # Loop through elements of inference network and define parameters
         for i in range(len(args.inference_size)):
             if i == 0:
-                prev_size = 3*args.latent_dim + args.action_dim
+                prev_size = 3*args.latent_dim
             else:
                 prev_size = args.inference_size[i-1]
             self.inference_w.append(tf.get_variable("inference_w"+str(i), [prev_size, args.inference_size[i]], 
@@ -148,17 +139,16 @@ class VariationalKoopman():
                                                 regularizer=tf.keras.regularizers.l2(args.reg_weight)))
         self.inference_b.append(tf.get_variable("inference_b_end", [2*args.latent_dim]))
  
-    def _get_inference_distribution(self, args, features, u, g_enc):
+    def _get_inference_distribution(self, args, features, g_enc):
         """Function to infer distribution over g
         Args:
             args: Various arguments and specifications
             features: Extracted features [batch_size, latent_dim]
-            u: Control input [batch_size, action_dim]
             g_enc: Temporal encoding of previous g-values [batch_size, latent_dim]
         Returns:
             Next g-value
         """
-        inference_input = tf.concat([features, u, self.temporal_encoding, g_enc], axis=1)
+        inference_input = tf.concat([features, self.temporal_encoding, g_enc], axis=1)
         for i in range(len(args.inference_size)):
             inference_input = tf.nn.relu(tf.nn.xw_plus_b(inference_input, self.inference_w[i], self.inference_b[i]))
         g_dist = tf.nn.xw_plus_b(inference_input, self.inference_w[-1], self.inference_b[-1])
@@ -212,7 +202,7 @@ class VariationalKoopman():
             g_enc = tf.nn.xw_plus_b(hidden, W_to_g_enc, b_to_g_enc)
 
             # Now get distribution over g_t and sample value
-            g_dist = self._get_inference_distribution(args, self.features[:, t], self.u[:, t-1], g_enc)
+            g_dist = self._get_inference_distribution(args, self.features[:, t], g_enc)
             g_t = self._gen_sample(args, g_dist)
 
             # Append values to list
@@ -229,8 +219,7 @@ class VariationalKoopman():
             args: Various arguments and specifications
         """
         gvals_reshape = tf.reshape(self.g_vals[:, :-1], [args.batch_size*(args.seq_length-1), args.latent_dim])
-        u_reshape = tf.reshape(self.u[:, :(args.seq_length-1)], [args.batch_size*(args.seq_length-1), args.action_dim])
-        prior_input = tf.concat([gvals_reshape, u_reshape], axis=1)
+        prior_input = gvals_reshape
 
         # Construct layers of prior network
         for ps in args.prior_size:
@@ -260,7 +249,7 @@ class VariationalKoopman():
             args: Various arguments and specifications
         """
         # Define X- and Y-matrices
-        X = tf.concat([self.g_vals[:, :-1], self.u[:, :(args.seq_length-1)]], axis=2)
+        X = self.g_vals[:, :-1]
         Y = self.g_vals[:, 1:]
 
         # Solve for A and B using least-squares
@@ -269,7 +258,7 @@ class VariationalKoopman():
         self.B = self.K[:, args.latent_dim:]
 
         # Perform least squares to find A-inverse
-        self.A_inv = tf.matrix_solve_ls(Y - tf.matmul(self.u[:, :(args.seq_length-1)], self.B), self.g_vals[:, :-1], l2_regularizer=args.l2_regularizer)
+        self.A_inv = tf.matrix_solve_ls(Y, self.g_vals[:, :-1], l2_regularizer=args.l2_regularizer)
         
         # Get predicted code at final time step
         self.z_t = self.g_vals[:, -1]
@@ -278,9 +267,7 @@ class VariationalKoopman():
         z_t = tf.expand_dims(self.z_t, axis=1)
         z_vals = [z_t]
         for t in range(args.seq_length-2, -1, -1):
-            u = self.u[:, t]
-            u = tf.expand_dims(u, axis=1)
-            z_t = tf.matmul(z_t - tf.matmul(u, self.B), self.A_inv)
+            z_t = tf.matmul(z_t, self.A_inv)
             z_vals.append(z_t) 
         self.z_vals_reshape = tf.stack(z_vals, axis=1)
 
@@ -328,7 +315,7 @@ class VariationalKoopman():
         return output
 
     def _generate_predictions(self, args):
-        """Generate predictions for how system will evolve given z1, A, and B (used for control, not during training)
+        """Generate predictions for how system will evolve given z1, and A (not used during training)
         Args:
             args: Various arguments and specifications
         """
@@ -336,9 +323,7 @@ class VariationalKoopman():
         z_t = tf.expand_dims(self.z1, axis=1)
         z_pred = [z_t]
         for t in range(args.seq_length, 2*args.seq_length):
-            u = self.u[:, t-1]
-            u = tf.expand_dims(u, axis=1)
-            z_t = tf.matmul(z_t, self.A) + tf.matmul(u, self.B)
+            z_t = tf.matmul(z_t, self.A)
             z_pred.append(z_t) 
         z_pred = tf.stack(z_pred, axis=1)
 
@@ -348,89 +333,19 @@ class VariationalKoopman():
         self.x_future_norm = tf.reshape(self._get_decoder_output(args, z_pred), [args.batch_size, args.seq_length, args.state_dim])
         self.x_future = self.x_future_norm*self.scale + self.shift
 
-    def _get_cost(self, args, z_u_t):
-        """Get cost associated with a set of states and actions
+    def _get_cost(self, args, z_t):
+        """Get cost associated with a set of states
         Args:
             args: Various arguments and specifications
-            z_u_t: Latent state and control input at given time step [batch_size, state_dim+action_dim]
+            z_t: Latent state at given time step [batch_size, state_dim]
         Returns:
             Cost [batch_size]
         """
-        z_t = z_u_t[:, :args.latent_dim]
-        u_t = z_u_t[:, args.latent_dim:]
         states = self._get_decoder_output(args, z_t)*self.scale + self.shift
         if args.domain_name == 'Pendulum-v0':
-            return tf.square(tf.atan2(states[:, 1], states[:, 0])) + 0.1*tf.square(states[:, 2]) + 0.001*tf.square(tf.squeeze(u_t))
+            return tf.square(tf.atan2(states[:, 1], states[:, 0])) + 0.1*tf.square(states[:, 2])
         else:
             raise NotImplementedError
-
-    def _find_ilqr_params(self, args):
-        """Find necessary params to perform iLQR
-        Args:
-            args: Various arguments and specifications
-        """
-        # Initialize state
-        z_t = self.z1
-
-        # Initialize lists to hold quantities
-        L = []
-        L_x = []
-        L_u = []
-        L_xx = []
-        L_ux = []
-        L_uu = [] 
-        z_vals = [z_t]
-
-        # Loop through time
-        for t in range(args.mpc_horizon):
-            # Find cost for current state
-            z_u_t = tf.concat([z_t, self.u_ilqr[:, t]], axis=1)
-            l_t = args.gamma**t*self._get_cost(args, z_u_t)
-
-            # Find gradients and Hessians (think you need to compute Hessians this way because it handles 3d tensors weirdly)
-            grads = tf.gradients(l_t, z_u_t)[0]
-            hessians = tf.reduce_sum(tf.hessians(l_t, z_u_t)[0], axis=2)              
-
-            # Separate into individual components
-            l_x = grads[:, :args.latent_dim]
-            l_u = grads[:, args.latent_dim:]
-            l_xx = hessians[:, :args.latent_dim, :args.latent_dim]
-            l_ux = hessians[:, args.latent_dim:, :args.latent_dim]
-            l_uu = hessians[:, args.latent_dim:, args.latent_dim:]
-
-            # Append to lists
-            L.append(l_t)
-            L_x.append(l_x)
-            L_u.append(l_u)
-            L_xx.append(l_xx)
-            L_ux.append(l_ux)
-            L_uu.append(l_uu)
-
-            # Find action by passing it through tanh
-            u_t = args.action_max*tf.nn.tanh(self.u_ilqr[:, t])
-            u_t = tf.expand_dims(u_t, axis=1)
-            z_t = tf.squeeze(tf.matmul(tf.expand_dims(z_t, axis=1), self.A) + tf.matmul(u_t, self.B))
-            z_vals.append(z_t)
-
-        # Find cost and gradients at last time step
-        z_u_t = tf.concat([z_t, tf.zeros_like(self.u_ilqr[:, -1])], axis=1)
-        l_T = args.gamma**args.seq_length*self._get_cost(args, z_u_t)
-        grads = tf.gradients(l_T, z_u_t)[0]
-        hessians = tf.reduce_sum(tf.hessians(l_T, z_u_t)[0], axis=2)  
-        L.append(l_T)
-        L_x.append(grads[:, :args.latent_dim])
-        L_xx.append(hessians[:, :args.latent_dim, :args.latent_dim])
-
-        # Finally stack into tensors
-        self.L = tf.stack(L, axis=1)
-        self.L_x = tf.stack(L_x, axis=1)
-        self.L_u = tf.stack(L_u, axis=1)
-        self.L_xx = tf.stack(L_xx, axis=1)
-        self.L_ux = tf.stack(L_ux, axis=1)
-        self.L_uu = tf.stack(L_uu, axis=1)
-        self.xs = tf.stack(z_vals, axis=1)
-        states_pred = self._get_decoder_output(args, tf.reshape(self.xs, [-1, args.latent_dim]))*self.scale + self.shift
-        self.states_pred = tf.reshape(states_pred, [args.batch_size, -1, args.state_dim])
 
     def _create_optimizer(self, args):
         """Create optimizer to minimize loss

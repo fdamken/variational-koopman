@@ -1,3 +1,8 @@
+# Ignore any deprecation warnings.
+from warnings import simplefilter
+simplefilter(action='ignore', category=FutureWarning)
+
+
 import os, sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -11,7 +16,7 @@ import time
 
 from replay_memory import ReplayMemory
 from variational_koopman_model import VariationalKoopman
-from utils import visualize_predictions, perform_rollouts
+from utils import visualize_predictions
 
 tf.disable_v2_behavior()
 
@@ -100,11 +105,9 @@ def train(args, net, env):
         # Generate data
         shift = sess.run(net.shift)
         scale = sess.run(net.scale)
-        shift_u = sess.run(net.shift_u)
-        scale_u = sess.run(net.scale_u)
 
         # Generate training data
-        replay_memory = ReplayMemory(args, shift, scale, shift_u, scale_u, env, net, sess, predict_evolution=True)
+        replay_memory = ReplayMemory(args, shift, scale, env, net, sess, predict_evolution=True)
 
         #Function to evaluate loss on validation set
         def val_loss(kl_weight):
@@ -114,12 +117,10 @@ def train(args, net, env):
                 # Get inputs
                 batch_dict = replay_memory.next_batch_val()
                 x = batch_dict['states']
-                u = batch_dict['inputs']
 
                 # Construct inputs for network
                 feed_in = {}
                 feed_in[net.x] = np.reshape(x, (2*args.batch_size*args.seq_length, args.state_dim))
-                feed_in[net.u] = u
                 feed_in[net.kl_weight] = kl_weight
 
                 # Find loss
@@ -139,8 +140,6 @@ def train(args, net, env):
             # Store normalization parameters
             sess.run(tf.assign(net.shift, replay_memory.shift_x))
             sess.run(tf.assign(net.scale, replay_memory.scale_x))
-            sess.run(tf.assign(net.shift_u, replay_memory.shift_u))
-            sess.run(tf.assign(net.scale_u, replay_memory.scale_u))
 
             # Initialize variable to track validation score over time
             old_score = 1e20
@@ -185,12 +184,10 @@ def train(args, net, env):
                     # Get inputs
                     batch_dict = replay_memory.next_batch_train()
                     x = batch_dict['states']
-                    u = batch_dict['inputs']
 
                     # Construct inputs for network
                     feed_in = {}
                     feed_in[net.x] = np.reshape(x, (2*args.batch_size*args.seq_length, args.state_dim))
-                    feed_in[net.u] = u
                     feed_in[net.kl_weight] = kl_weight
 
                     # Find loss and perform training operation
@@ -245,12 +242,6 @@ def train(args, net, env):
                 print("model saved to {}".format(checkpoint_path))
             
                 old_score = score
-            
-            # Run trials to evaluate models and generate new training data
-            if args.ilqr:
-                avg_reward = perform_rollouts(args, net, env, sess, replay_memory)
-                print('Number of training batches now is:', replay_memory.n_batches_train)
-                if avg_reward > 180.0: break
 
 if __name__ == '__main__':
     main()

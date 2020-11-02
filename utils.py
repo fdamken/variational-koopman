@@ -5,8 +5,6 @@ import os, sys
 import progressbar
 import tensorflow.compat.v1 as tf
 
-from controller import iLQR
-
 tf.disable_v2_behavior()
 
 
@@ -22,9 +20,7 @@ def visualize_predictions(args, sess, net, replay_memory, env, e=0):
     """
 	# Get inputs (test trajectory that is twice the size of a standard sequence)
     x = np.zeros((args.batch_size, 2*args.seq_length, args.state_dim), dtype=np.float32)
-    u = np.zeros((args.batch_size, 2*args.seq_length-1, args.action_dim), dtype=np.float32)
     x[:] = replay_memory.x_test
-    u[:] = replay_memory.u_test
 
     # Find number of times to feed in input
     n_passes = 200//args.batch_size
@@ -35,7 +31,6 @@ def visualize_predictions(args, sess, net, replay_memory, env, e=0):
         # Construct inputs for network
         feed_in = {}
         feed_in[net.x] = np.reshape(x, (2*args.batch_size*args.seq_length, args.state_dim))
-        feed_in[net.u] = u
         feed_out = [net.A, net.B, net.z_vals, net.x_pred_reshape_unnorm]
         out = sess.run(feed_out, feed_in)
         A = out[0]
@@ -100,190 +95,3 @@ def pendulum_cost(states, us, gamma):
 
     # Return discounted cost
     return [gamma**t*exp_cost[t] for t in range(N)]
-
-def perform_mpc(args, net, env, sess, render=False, seed=-1, worst_case=False):
-    """Function to perform model predictive control
-    Args:
-        args: Various arguments and specifications
-        net: Neural network dynamics model
-        env: Simulation environment
-        sess: TensorFlow session
-        render: Whether to render environment during rollout
-        replay_memory: Object containing training/validation data
-        seed: Random seed
-        worst_case: Whether to optimize for worst case  
-    Returns:
-        Tuple of
-            reward: Number of time steps vertical (specific to inverted pendulum environment)
-            x_replay: Observed states during rollout
-            u_replay: Observed actions during rollout
-            cost: Cumulative environment cost
-            fall_count: Number of falls from vertical (specific to inverted pendulum environment)
-    """
-    # Get normalization params
-    shift = sess.run(net.shift)
-    scale = sess.run(net.scale)
-
-    # Initialize arrays to hold recent states and actions
-    x = np.zeros((args.seq_length, args.state_dim), dtype=np.float32)
-    u = np.zeros((args.seq_length-1, args.action_dim), dtype=np.float32)
-
-    # Initialize arrays to hold data to be added to replay buffer
-    x_replay = np.zeros((args.trial_len, args.state_dim), dtype=np.float32)
-    u_replay = np.zeros((args.trial_len-1, args.action_dim), dtype=np.float32)
-
-    # Get initial state and initialize variables to track reward and cost
-    new_state = env.reset()
-    x = np.concatenate((x[1:], np.expand_dims(new_state, axis=0)), axis=0)
-    x_replay[0] = new_state
-    reward = 0.0
-    cost = 0.0
-    sum_cost = 100.0
-
-    # Define ilQR controller
-    if args.domain_name == 'Pendulum-v0':
-        ilqr = iLQR(args, net, sess, pendulum_cost, worst_case=worst_case)
-    else:
-        raise NotImplementedError
-
-    # Set seeds
-    if seed >= 0:
-        np.random.seed(seed)
-
-    # Define initial action sequence
-    us_init = np.random.uniform(-1, 1, (args.mpc_horizon, args.action_dim))
-
-    # Define progress bar
-    bar = progressbar.ProgressBar(maxval=args.trial_len).start()
-
-    # Define variables to track whether pendulum is vertical and falls
-    vertical = False
-    vertical_count = 0
-    fall_count = 0
-    time_sum = 0.0
-
-    # Loop through time
-    for t in range(1, args.trial_len):
-        bar.update(t)
-        if render: env.render()
-        
-        # If enough time steps have passed, find action through MPC, otherwise take random action
-        if t >= args.seq_length:
-
-            # Construct state and action inputs for network
-            x_in = np.tile(x, (args.batch_size, 2, 1))
-            x_in = x_in.reshape(args.batch_size*2*args.seq_length, args.state_dim)
-            u_in = np.tile(u, (args.batch_size, 1, 1))
-            u_in = np.concatenate((u_in, np.zeros((args.batch_size, args.seq_length, args.action_dim))), axis=1)
-
-            # Find number of times to do pass through network
-            n_passes = int(math.ceil(args.num_models/float(args.batch_size)))
-
-            # Initialize arrays to hold set of A, B, and z0 values
-            As_full = np.zeros((n_passes*args.batch_size, args.latent_dim, args.latent_dim))
-            Bs_full = np.zeros((n_passes*args.batch_size, args.action_dim, args.latent_dim))
-            z0s_full = np.zeros((n_passes*args.batch_size, args.latent_dim))
-
-            # Make passes through network to find models and ICs
-            for n in range(n_passes):
-                feed_in = {}
-                feed_in[net.x] = (x_in - shift)/scale
-                feed_in[net.u] = u_in
-                feed_out = [net.z_vals, net.A, net.B]
-                z_vals, A, B = sess.run(feed_out, feed_in)
-                z_vals = z_vals.reshape(args.batch_size, args.seq_length, args.latent_dim)
-
-                z0s_full[args.batch_size*n:(args.batch_size*(n+1))] = z_vals[:, -1]
-                As_full[args.batch_size*n:(args.batch_size*(n+1))] = A
-                Bs_full[args.batch_size*n:(args.batch_size*(n+1))] = B
-                
-            As = As_full[:args.num_models]
-            Bs = Bs_full[:args.num_models]
-            z0s = z0s_full[:args.num_models]
-
-            # Define number of iterations
-            n_iterations = 5
-            
-            # At initial time step perform 100+ iterations to get good initial action sequence
-            if t == args.seq_length:
-                n_iterations += 99
-
-            # Find action sequence, execute first action, and update initial action sequence
-            xs, us, L_opt = ilqr.fit(z0s, us_init, As, Bs, n_iterations = n_iterations)
-            action = args.action_max*np.tanh(us[0])
-            us_init = np.vstack([us[1:], np.random.uniform(-1, 1, (1, args.action_dim))])
-
-        # If not enough time has passed, take random action
-        else:
-            action = env.action_space.sample() 
-        
-        # Update record of actions
-        u = np.concatenate((u[1:], np.expand_dims(action, axis=0)), axis=0)
-        u_replay[t-1] = action
-
-        # Observe new state and update array
-        step_info = env.step(np.array([action]))
-        new_state = step_info[0][:, 0]
-        x = np.concatenate((x[1:], np.expand_dims(new_state, axis=0)), axis=0)
-        x_replay[t] = new_state
-        
-        # If enough time has passed, extract metrics
-        if t >= args.seq_length:
-            cost -= step_info[1]
-            
-            theta = np.arctan2(new_state[1], new_state[0])
-            r = 1.0*(np.abs(theta) <= np.pi/8.0)
-            reward += r
-            
-            # Check for falling from vertical
-            if r > 0.0 and not vertical:
-                vertical = True
-                vertical_count = 1
-            elif r > 0.0:
-                vertical_count += 1
-            elif vertical:
-                vertical = False
-                if vertical_count > 20:
-                    fall_count += 1
-                vertical_count = 0
-                
-    bar.finish()
-    return reward, x_replay, u_replay, cost[0], fall_count
-
-def perform_rollouts(args, net, env, sess, replay_memory):
-    """Function to perform rollouts with trained model
-    Args:
-        args: Various arguments and specifications
-        net: Neural network dynamics model
-        env: Simulation environment
-        sess: TensorFlow session
-        replay_memory: Object containing training/validation data
-    Returns:
-        Average reward across rollouts
-    """
-    print('Performing rollouts...')
-    n_trials = args.n_trials//10
-    rewards = 0.0
-
-    # Initialize arrays to hold data to be added to replay buffer
-    x_replay = np.zeros((n_trials, args.n_subseq, replay_memory.seq_length, args.state_dim), dtype=np.float32)
-    u_replay = np.zeros((n_trials, args.n_subseq, replay_memory.seq_length-1, args.action_dim), dtype=np.float32)
-    for n in range(n_trials):
-        # Perform MPC to evaluate model and get new training data
-        reward, x_replay_n, u_replay_n, cost_norm, falls = perform_mpc(args, net, env, sess, worst_case=args.worst_case)
-
-        # Divide into subsequences
-        for j in range(args.n_subseq):
-            x_replay[n, j] = x_replay_n[int(replay_memory.start_idxs[j]):(int(replay_memory.start_idxs[j])+replay_memory.seq_length)]
-            u_replay[n, j] = u_replay_n[int(replay_memory.start_idxs[j]):(int(replay_memory.start_idxs[j])+replay_memory.seq_length-1)]
-        print('trial ' + str(n) + ': ' + str(reward))
-        rewards += reward
-
-    # Update training data
-    x_replay = x_replay.reshape(n_trials*args.n_subseq, replay_memory.seq_length, args.state_dim)
-    u_replay = u_replay.reshape(n_trials*args.n_subseq, replay_memory.seq_length-1, args.action_dim)
-    replay_memory.update_data(x_replay, u_replay, args.val_frac)
-
-    # Return average reward
-    return rewards/n_trials
-

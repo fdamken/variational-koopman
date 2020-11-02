@@ -5,14 +5,12 @@ import progressbar
 
 # Class to load and preprocess data
 class ReplayMemory():
-    def __init__(self, args, shift, scale, shift_u, scale_u, env, net, sess, predict_evolution=False):
+    def __init__(self, args, shift, scale, env, net, sess, predict_evolution=False):
         """Constructs object to hold and update training/validation data.
         Args:
             args: Various arguments and specifications
             shift: Shift of state values for normalization
             scale: Scaling of state values for normalization
-            shift_u: Shift of action values for normalization
-            scale_u: Scaling of action values for normalization
             env: Simulation environment
             net: Neural network dynamics model
             sess: TensorFlow session
@@ -22,8 +20,6 @@ class ReplayMemory():
         self.seq_length = 2*args.seq_length if predict_evolution else args.seq_length
         self.shift_x = shift
         self.scale_x = scale
-        self.shift_u = shift_u
-        self.scale_u = scale_u
         self.env = env
         self.net = net
         self.sess = sess
@@ -45,9 +41,8 @@ class ReplayMemory():
         Args:
             args: Various arguments and specifications
         """
-        # Initialize array to hold states and actions
+        # Initialize array to hold states
         x = np.zeros((args.n_trials, args.n_subseq, self.seq_length, args.state_dim), dtype=np.float32)
-        u = np.zeros((args.n_trials, args.n_subseq, self.seq_length-1, args.action_dim), dtype=np.float32)
 
         # Define progress bar
         bar = progressbar.ProgressBar(maxval=args.n_trials).start()
@@ -56,43 +51,41 @@ class ReplayMemory():
         stagger = (args.trial_len - self.seq_length)/args.n_subseq
         self.start_idxs = np.linspace(0, stagger*args.n_subseq, args.n_subseq)
 
+        # Get neutral action to simulate environment w/o control inputs
+        env_name = self.env.spec.id.split('-')[0]
+        if env_name == 'Pendulum':
+            neutral_action = np.array((0.0,))
+        else:
+            raise Exception(f'Unsupported environment {env_name}!')
+
         # Loop through episodes
         for i in range(args.n_trials):
-            # Define arrays to hold observed states and actions in each trial
+            # Define arrays to hold observed states
             x_trial = np.zeros((args.trial_len, args.state_dim), dtype=np.float32)
-            u_trial = np.zeros((args.trial_len-1, args.action_dim), dtype=np.float32)
 
-            # Reset environment and simulate with random actions
+            # Reset environment and simulate with neutral action (i.e. without an action)
             x_trial[0] = self.env.reset()
             for t in range(1, args.trial_len):
-                action = self.env.action_space.sample()  
-                u_trial[t-1] = action
-                step_info = self.env.step(action)
+                step_info = self.env.step(neutral_action)
                 x_trial[t] = np.squeeze(step_info[0])
 
             # Divide into subsequences
             for j in range(args.n_subseq):
                 x[i, j] = x_trial[int(self.start_idxs[j]):(int(self.start_idxs[j])+self.seq_length)]
-                u[i, j] = u_trial[int(self.start_idxs[j]):(int(self.start_idxs[j])+self.seq_length-1)]
             bar.update(i)
         bar.finish()
 
         # Generate test scenario that is double the length of standard sequences
         self.x_test = np.zeros((2*args.seq_length, args.state_dim), dtype=np.float32)
-        self.u_test = np.zeros((2*args.seq_length-1, args.action_dim), dtype=np.float32)
         self.x_test[0] = self.env.reset()
         for t in range(1, 2*args.seq_length):
-            action = self.env.action_space.sample()
-            self.u_test[t-1] = action
-            step_info = self.env.step(action)
+            step_info = self.env.step(neutral_action)
             self.x_test[t] = np.squeeze(step_info[0])
 
         # Reshape and trim data sets
         self.x = x.reshape(-1, self.seq_length, args.state_dim)
-        self.u = u.reshape(-1, self.seq_length-1, args.action_dim)
         len_x = int(np.floor(len(self.x)/args.batch_size)*args.batch_size)
         self.x = self.x[:len_x]
-        self.u = self.u[:len_x]
 
     def _process_data(self, args):
         """Create batch dicts and shuffle data
@@ -104,16 +97,13 @@ class ReplayMemory():
 
         # Print tensor shapes
         print('states: ', self.x.shape)
-        print('inputs: ', self.u.shape)
-            
+
         self.batch_dict['states'] = np.zeros((args.batch_size, self.seq_length, args.state_dim))
-        self.batch_dict['inputs'] = np.zeros((args.batch_size, self.seq_length-1, args.action_dim))
 
         # Shuffle data before splitting into train/val
         print('shuffling...')
         p = np.random.permutation(len(self.x))
         self.x = self.x[p]
-        self.u = self.u[p]
 
     def _create_split(self, args):
         """Divide data into training/validation sets
@@ -130,9 +120,7 @@ class ReplayMemory():
 
         # Divide into train and validation datasets
         self.x_val = self.x[self.n_batches_train*args.batch_size:]
-        self.u_val = self.u[self.n_batches_train*args.batch_size:]
         self.x = self.x[:self.n_batches_train*args.batch_size]
-        self.u = self.u[:self.n_batches_train*args.batch_size]
 
         # Set batch pointer for training and validation sets
         self.reset_batchptr_train()
@@ -147,46 +135,32 @@ class ReplayMemory():
         if np.sum(self.scale_x) == 0.0:
             self.shift_x = np.mean(self.x[:self.n_batches_train], axis=(0, 1))
             self.scale_x = np.std(self.x[:self.n_batches_train], axis=(0, 1))
-            self.shift_u = np.mean(self.u[:self.n_batches_train], axis=(0, 1))
-            self.scale_u = np.std(self.u[:self.n_batches_train], axis=(0, 1))
 
             # Remove very small scale values
             self.scale_x[self.scale_x < 1e-6] = 1.0
 
-            # Set u norm params to be 0, 1 for pendulum environment
-            if args.domain_name == 'Pendulum-v0':
-                self.shift_u = np.zeros_like(self.shift_u)
-                self.scale_u = np.ones_like(self.scale_u)
-
         # Shift and scale values for test sequence
         self.x_test = (self.x_test - self.shift_x)/self.scale_x
-        self.u_test = (self.u_test - self.shift_u)/self.scale_u
 
-    def update_data(self, x_new, u_new, val_frac):
+    def update_data(self, x_new, val_frac):
         """Update training/validation data
         Args:
             x_new: New state values
-            u_new: New control inputs
             val_frac: Fraction of new data to include in validation set
         """
         # First permute data
         p = np.random.permutation(len(x_new))
         x_new = x_new[p]
-        u_new = u_new[p]
 
         # Divide new data into training and validation components
         n_seq_val = max(int(math.floor(val_frac * len(x_new))), 1)
         n_seq_train = len(x_new) - n_seq_val
         x_new_val = x_new[n_seq_train:]
-        u_new_val = u_new[n_seq_train:]
         x_new = x_new[:n_seq_train]
-        u_new = u_new[:n_seq_train]
 
         # Now update training and validation data
         self.x = np.concatenate((x_new, self.x), axis=0)
-        self.u = np.concatenate((u_new, self.u), axis=0)
         self.x_val = np.concatenate((x_new_val, self.x_val), axis=0)
-        self.u_val = np.concatenate((u_new_val, self.u_val), axis=0)
 
         # Update sizes of train and val sets
         self.n_batches_train = len(self.x)//self.batch_size
@@ -202,7 +176,6 @@ class ReplayMemory():
         # Extract next batch
         batch_index = self.batch_permuation_train[self.batchptr_train*self.batch_size:(self.batchptr_train+1)*self.batch_size]
         self.batch_dict['states'] = (self.x[batch_index] - self.shift_x)/self.scale_x
-        self.batch_dict['inputs'] = (self.u[batch_index] - self.shift_u)/self.scale_u
 
         # Update pointer
         self.batchptr_train += 1
@@ -226,7 +199,6 @@ class ReplayMemory():
         # Extract next validation batch
         batch_index = range(self.batchptr_val*self.batch_size,(self.batchptr_val+1)*self.batch_size)
         self.batch_dict['states'] = (self.x_val[batch_index] - self.shift_x)/self.scale_x
-        self.batch_dict['inputs'] = (self.u_val[batch_index] - self.shift_u)/self.scale_u
 
         # Update pointer
         self.batchptr_val += 1
