@@ -3,9 +3,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os, sys
 import progressbar
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 
 from controller import iLQR
+
+tf.disable_v2_behavior()
+
 
 def visualize_predictions(args, sess, net, replay_memory, env, e=0):
     """Plot predictions for a system against true time evolution

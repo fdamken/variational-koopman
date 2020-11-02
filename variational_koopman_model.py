@@ -1,6 +1,9 @@
 import numpy as np
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 import pdb
+
+tf.disable_v2_behavior()
+
 
 class VariationalKoopman():
     def __init__(self, args):
@@ -55,12 +58,12 @@ class VariationalKoopman():
             else:
                 prev_size = args.extractor_size[i-1]
             self.extractor_w.append(tf.get_variable("extractor_w"+str(i), [prev_size, args.extractor_size[i]], 
-                                                regularizer=tf.contrib.layers.l2_regularizer(args.reg_weight)))
+                                                regularizer=tf.keras.regularizers.l2(args.reg_weight)))
             self.extractor_b.append(tf.get_variable("extractor_b"+str(i), [args.extractor_size[i]]))
 
         # Last set of weights to map to output
         self.extractor_w.append(tf.get_variable("extractor_w_end", [args.extractor_size[-1], args.latent_dim], 
-                                                regularizer=tf.contrib.layers.l2_regularizer(args.reg_weight)))
+                                                regularizer=tf.keras.regularizers.l2(args.reg_weight)))
         self.extractor_b.append(tf.get_variable("extractor_b_end", [args.latent_dim]))
 
     def _get_extractor_output(self, args, states):
@@ -91,8 +94,8 @@ class VariationalKoopman():
             args: Various arguments and specifications
         """
         # Define forward and backward layers
-        fwd_cell = tf.nn.rnn_cell.LSTMCell(args.rnn_size, initializer=tf.contrib.layers.xavier_initializer())
-        bwd_cell = tf.nn.rnn_cell.LSTMCell(args.rnn_size, initializer=tf.contrib.layers.xavier_initializer())
+        fwd_cell = tf.nn.rnn_cell.LSTMCell(args.rnn_size, initializer=tf.keras.initializers.glorot_normal())
+        bwd_cell = tf.nn.rnn_cell.LSTMCell(args.rnn_size, initializer=tf.keras.initializers.glorot_normal())
 
         # Construct input -- concatenate sequence of states with sequence of actions
         padded_u = tf.concat([tf.zeros([args.batch_size, 1, args.action_dim]), self.u[:, :(args.seq_length-1)]], axis=1)
@@ -107,20 +110,20 @@ class VariationalKoopman():
         hidden = tf.layers.dense(output, 
                                 units=args.transform_size, 
                                 activation=tf.nn.relu,
-                                kernel_regularizer=tf.contrib.layers.l2_regularizer(args.reg_weight))
+                                kernel_regularizer=tf.keras.regularizers.l2(args.reg_weight))
         self.temporal_encoding = tf.layers.dense(hidden, 
                                     units=args.latent_dim, 
-                                    kernel_regularizer=tf.contrib.layers.l2_regularizer(args.reg_weight))
+                                    kernel_regularizer=tf.keras.regularizers.l2(args.reg_weight))
 
         # Now construct distribution over g1 through transformation with single hidden layer
         g_input = tf.concat([self.temporal_encoding, self.features[:, 0]], axis=1)
         hidden = tf.layers.dense(g_input, 
                                     units=args.transform_size, 
                                     activation=tf.nn.relu, 
-                                    kernel_regularizer=tf.contrib.layers.l2_regularizer(args.reg_weight))
+                                    kernel_regularizer=tf.keras.regularizers.l2(args.reg_weight))
         self.g1_dist = tf.layers.dense(hidden, 
                                         units=2*args.latent_dim,
-                                        kernel_regularizer=tf.contrib.layers.l2_regularizer(args.reg_weight))
+                                        kernel_regularizer=tf.keras.regularizers.l2(args.reg_weight))
 
     def _create_inference_network_params(self, args):
         """Create parameters to comprise inference network
@@ -137,12 +140,12 @@ class VariationalKoopman():
             else:
                 prev_size = args.inference_size[i-1]
             self.inference_w.append(tf.get_variable("inference_w"+str(i), [prev_size, args.inference_size[i]], 
-                                                regularizer=tf.contrib.layers.l2_regularizer(args.reg_weight)))
+                                                regularizer=tf.keras.regularizers.l2(args.reg_weight)))
             self.inference_b.append(tf.get_variable("inference_b"+str(i), [args.inference_size[i]]))
 
         # Last set of weights to map to output
         self.inference_w.append(tf.get_variable("inference_w_end", [args.inference_size[-1], 2*args.latent_dim], 
-                                                regularizer=tf.contrib.layers.l2_regularizer(args.reg_weight)))
+                                                regularizer=tf.keras.regularizers.l2(args.reg_weight)))
         self.inference_b.append(tf.get_variable("inference_b_end", [2*args.latent_dim]))
  
     def _get_inference_distribution(self, args, features, u, g_enc):
@@ -191,14 +194,14 @@ class VariationalKoopman():
 
         # Create parameters for transformation to be performed at output of GRU in observation encoder
         W_g_out = tf.get_variable("w_g_out", [args.rnn_size, args.transform_size], 
-                                                regularizer=tf.contrib.layers.l2_regularizer(args.reg_weight))
+                                                regularizer=tf.keras.regularizers.l2(args.reg_weight))
         b_g_out = tf.get_variable("b_g_out", [args.transform_size])
         W_to_g_enc = tf.get_variable("w_to_g_enc", [args.transform_size, args.latent_dim], 
-                                                regularizer=tf.contrib.layers.l2_regularizer(args.reg_weight))
+                                                regularizer=tf.keras.regularizers.l2(args.reg_weight))
         b_to_g_enc = tf.get_variable("b_to_g_enc", [args.latent_dim])
 
         # Initialize single-layer GRU network to create observation encodings
-        cell = tf.nn.rnn_cell.GRUCell(args.rnn_size, kernel_initializer=tf.contrib.layers.xavier_initializer())
+        cell = tf.nn.rnn_cell.GRUCell(args.rnn_size, kernel_initializer=tf.keras.initializers.glorot_normal())
         self.rnn_state = cell.zero_state(args.batch_size, tf.float32)
         g_t = self.g_t
 
@@ -234,12 +237,12 @@ class VariationalKoopman():
             prior_input = tf.layers.dense(prior_input, 
                                             units=ps, 
                                             activation=tf.nn.relu, 
-                                            kernel_regularizer=tf.contrib.layers.l2_regularizer(args.reg_weight))
+                                            kernel_regularizer=tf.keras.regularizers.l2(args.reg_weight))
 
         # Final affine transform to dist params
         prior_params = tf.layers.dense(prior_input, 
                                             units=2*args.latent_dim,
-                                            kernel_regularizer=tf.contrib.layers.l2_regularizer(args.reg_weight))
+                                            kernel_regularizer=tf.keras.regularizers.l2(args.reg_weight))
         prior_params = tf.reshape(prior_params, [args.batch_size, args.seq_length-1, 2*args.latent_dim])
 
         # Construct diagonal unit Gaussian prior params for g1
@@ -302,12 +305,12 @@ class VariationalKoopman():
             else:
                 prev_size = args.extractor_size[i+1]
             self.decoder_w.append(tf.get_variable("decoder_w"+str(len(args.extractor_size)-i), [prev_size, args.extractor_size[i]], 
-                                                regularizer=tf.contrib.layers.l2_regularizer(args.reg_weight)))
+                                                regularizer=tf.keras.regularizers.l2(args.reg_weight)))
             self.decoder_b.append(tf.get_variable("decoder_b"+str(len(args.extractor_size)-i), [args.extractor_size[i]]))
 
         # Last set of weights to map to output
         self.decoder_w.append(tf.get_variable("decoder_w_end", [args.extractor_size[0], args.state_dim], 
-                                                regularizer=tf.contrib.layers.l2_regularizer(args.reg_weight)))
+                                                regularizer=tf.keras.regularizers.l2(args.reg_weight)))
         self.decoder_b.append(tf.get_variable("decoder_b_end", [args.state_dim]))
 
     def _get_decoder_output(self, args, encodings):

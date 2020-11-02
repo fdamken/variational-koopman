@@ -6,12 +6,15 @@ import gym
 import numpy as np
 import progressbar
 import random
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 import time
 
 from replay_memory import ReplayMemory
 from variational_koopman_model import VariationalKoopman
 from utils import visualize_predictions, perform_rollouts
+
+tf.disable_v2_behavior()
+
 
 def main():
     ######################################

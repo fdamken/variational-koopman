@@ -6,9 +6,11 @@ import abc
 import warnings
 import math
 import numpy as np
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 
 from scipy.linalg import block_diag
+
+tf.disable_v2_behavior()
 
 
 @six.add_metaclass(abc.ABCMeta)
