@@ -1,4 +1,8 @@
 import math
+from copy import deepcopy
+
+import jsonpickle
+import jsonpickle.ext.numpy as jsonpickle_numpy
 import matplotlib.pyplot as plt
 import numpy as np
 import os, sys
@@ -8,6 +12,7 @@ import tensorflow.compat.v1 as tf
 from controller import iLQR
 
 tf.disable_v2_behavior()
+jsonpickle_numpy.register_handlers()
 
 
 def visualize_predictions(args, sess, net, replay_memory, env, e=0):
@@ -44,7 +49,7 @@ def visualize_predictions(args, sess, net, replay_memory, env, e=0):
         x_pred = out[3]
         x_pred = x_pred[:, :-1]
 
-        preds = np.concatenate((preds, x_pred), axis=0)       
+        preds = np.concatenate((preds, x_pred), axis=0)
     preds = preds[1:]
 
     # Find mean, max, and min of predictions
@@ -79,6 +84,14 @@ def visualize_predictions(args, sess, net, replay_memory, env, e=0):
     plt.xlabel('Time Step')
     plt.xlim([1, 2*args.seq_length-1])
     plt.savefig('vk_predictions/predictions_' + str(e) + '.png')
+
+    with open('vk_predictions/predictions_' + str(e) + '.json', 'w') as f:
+        f.write(jsonpickle.dumps({
+            'x': x.copy(),
+            'preds': preds.copy(),
+            'best_pred': ind0.copy(),
+            'worst_pred': ind1.copy()
+        }))
  
 def pendulum_cost(states, us, gamma):
     """Define cost function for inverted pendulum
