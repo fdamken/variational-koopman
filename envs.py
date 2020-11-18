@@ -7,6 +7,7 @@ from gym.envs.classic_control.acrobot import *
 
 gym.envs.register(id='ContinuousAcrobot-v0', entry_point='envs:ContinuousAcrobotEnv')
 gym.envs.register(id='ContinuousCartPole-v0', entry_point='envs:ContinuousCartPoleEnv')
+gym.envs.register(id='ContinuousSineCosineCartPoleEnv-v0', entry_point='envs:ContinuousSineCosineCartPoleEnv')
 
 
 class ContinuousAcrobotEnv(AcrobotEnv):
@@ -109,6 +110,14 @@ class ContinuousCartPoleEnv(CartPoleEnv):
             reward = 0.0
 
         return self._get_obs(), reward, done, {}
+
+    def _get_obs(self):
+        return self.state
+
+
+class ContinuousSineCosineCartPoleEnv(ContinuousCartPoleEnv):
+    def __init__(self):
+        super().__init__()
 
     def _get_obs(self):
         x, x_dot, theta, theta_dot = self.state
