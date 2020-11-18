@@ -13,6 +13,9 @@ from replay_memory import ReplayMemory
 from variational_koopman_model import VariationalKoopman
 from utils import visualize_predictions, perform_rollouts
 
+# noinspection PyUnresolvedReferences
+import envs
+
 tf.disable_v2_behavior()
 
 
@@ -74,7 +77,7 @@ def main():
 
     # Find state and action dimensionality from environment
     args.state_dim = env.observation_space.shape[0]
-    if args.domain_name == 'CartPole-v1': args.state_dim += 1 # taking sine and cosine of theta
+    if args.domain_name == 'ContinuousCartPole-v0': args.state_dim += 1 # taking sine and cosine of theta
     args.action_dim = env.action_space.shape[0]
     args.action_max = env.action_space.high[0]
 

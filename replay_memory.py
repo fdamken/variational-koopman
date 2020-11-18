@@ -65,7 +65,7 @@ class ReplayMemory():
             # Reset environment and simulate with random actions
             x_trial[0] = self.env.reset()
             for t in range(1, args.trial_len):
-                action = self.env.action_space.sample()  
+                action = np.zeros(self.env.action_space.shape)
                 u_trial[t-1] = action
                 step_info = self.env.step(action)
                 x_trial[t] = np.squeeze(step_info[0])
@@ -82,7 +82,7 @@ class ReplayMemory():
         self.u_test = np.zeros((2*args.seq_length-1, args.action_dim), dtype=np.float32)
         self.x_test[0] = self.env.reset()
         for t in range(1, 2*args.seq_length):
-            action = self.env.action_space.sample()
+            action = np.zeros(self.env.action_space.shape)
             self.u_test[t-1] = action
             step_info = self.env.step(action)
             self.x_test[t] = np.squeeze(step_info[0])
@@ -148,7 +148,9 @@ class ReplayMemory():
             self.shift_x = np.mean(self.x[:self.n_batches_train], axis=(0, 1))
             self.scale_x = np.std(self.x[:self.n_batches_train], axis=(0, 1))
             self.shift_u = np.mean(self.u[:self.n_batches_train], axis=(0, 1))
+            self.shift_u = np.zeros_like(self.shift_u)
             self.scale_u = np.std(self.u[:self.n_batches_train], axis=(0, 1))
+            self.scale_u = np.ones_like(self.scale_u)
 
             # Remove very small scale values
             self.scale_x[self.scale_x < 1e-6] = 1.0
